@@ -1,9 +1,12 @@
+"""'test_salesforce.py'."""
+
 from viadot.orchestration.prefect.flows import salesforce_to_adls
 
 
-def test_salesforce_to_adls(salesforce_config_key, adls_credentials_secret):
+def test_salesforce_to_adls():
+    """Test SalesForce prefect flow."""
     state = salesforce_to_adls(
-        azure_key_vault_secret=salesforce_config_key,
+        azure_key_vault_secret="salesforce-prod",
         env="dev",
         table="Contact",
         adls_path="raw/dyvenia_sandbox/salesforce/salesforce.csv",
