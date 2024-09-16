@@ -1,10 +1,11 @@
 """SAP BW API connector."""
 
 import textwrap
+from typing import Any
 
 import pandas as pd
-import pyrfc
 from pydantic import BaseModel
+import pyrfc
 
 from viadot.config import get_source_credentials
 from viadot.exceptions import CredentialError, ValidationError
@@ -76,7 +77,8 @@ class Sapbw(Source):
         """
         credentials = credentials or get_source_credentials(config_key) or None
         if credentials is None:
-            raise CredentialError("Missing credentials.")
+            message = "Missing credentials."
+            raise CredentialError(message)
         self.credentials = credentials
 
         validated_creds = dict(SapbwCredentials(**credentials))
@@ -90,7 +92,6 @@ class Sapbw(Source):
         Returns:
             Connection: Connection to SAP.
         """
-
         return pyrfc.Connection(
             ashost=self.credentials.get("ashost"),
             sysnr=self.credentials.get("sysnr"),
@@ -114,16 +115,50 @@ class Sapbw(Source):
         self.query_output = conn.call("RSR_MDX_GET_FLAT_DATA", DATASETID=datasetid)
         conn.close()
 
+    def _apply_user_mapping(
+        self,
+        df: pd.DataFrame,
+        mapping_dict: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Apply the column mapping defined by user for the output dataframe.
+
+            DataFrame will be cut to selected columns - if any other columns need to be
+        included in the output file, please add them to the mapping dictionary with
+        original names.
+
+        Args:
+            df (pd.DataFrame): Input dataframe for the column mapping task.
+            mapping_dict (dict[str, Any], optional): Dictionary with original and new
+                column names. Defaults to None.
+
+        Returns:
+            pd.DataFrame: Output DataFrame with mapped columns.
+        """
+        self.logger.info("Applying user defined mapping for columns...")
+        df = df[mapping_dict.keys()]
+        df.columns = mapping_dict.values()
+
+        self.logger.info("Successfully applied user mapping.")
+
+        return df
+
     @add_viadot_metadata_columns
-    def to_df(self) -> pd.DataFrame:
+    def to_df(
+        self,
+        if_empty: str = "warn",
+        mapping_dict: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
         """Convert the SAP BW output JSON data into a dataframe.
 
         Args:
-
+            if_empty (str, optional): What to do if a fetch produce no data.
+                Defaults to "warn
 
         Raises:
             ValidationError: Prints the original SAP error message in case of issues
                 with MDX execution.
+            mapping_dict (dict[str, Any], optional): Dictionary with original and new
+                column names. Defaults to None.
 
         Returns:
             pd.Dataframe: The response data as a pandas DataFrame plus viadot metadata.
@@ -140,11 +175,48 @@ class Sapbw(Source):
             rows = [raw_data[row] for row in raw_data]
             cols = [x["DATA"] for x in self.query_output["HEADER"]]
 
-            df = pd.DataFrame(data=rows)
-            df.columns = cols
+            data_frame = pd.DataFrame(data=rows)
+            data_frame.columns = cols
 
         else:
-            df = pd.DataFrame()
+            data_frame = pd.DataFrame()
             raise ValidationError(self.query_output["RETURN"]["MESSAGE"])
 
-        return df
+        if mapping_dict:
+            data_frame = self._apply_user_mapping(data_frame, mapping_dict)
+
+        if data_frame.empty:
+            self._handle_if_empty(
+                if_empty=if_empty,
+                message="The response does not contain any data.",
+            )
+        else:
+            self.logger.info("Successfully downloaded data from the Mindful API.")
+
+        return data_frame
+
+    def available_columns(self, mdx_query: str) -> list[str]:
+        """Generate list of all available columns in a SAP BW table.
+
+        Args:
+            mdx_query (str): The MDX query to be passed to connection.
+
+        Returns:
+            list[str]: List of all available columns in the source table.
+        """
+        conn = self._create_connection()
+        query = textwrap.wrap(mdx_query, width=75)
+
+        properties = conn.call("RSR_MDX_CREATE_STORED_OBJECT", COMMAND_TEXT=query)
+        datasetid = properties["DATASETID"]
+
+        if properties["RETURN"]["MESSAGE"] == "":
+            get_axis_info = conn.call("RSR_MDX_GET_AXIS_INFO", DATASETID=datasetid)
+            cols = get_axis_info["AXIS_DIMENSIONS"]
+
+            all_available_columns = [x["DIM_UNAM"] for x in cols]
+        else:
+            all_available_columns = []
+            self.logger.error(properties["RETURN"]["MESSAGE"])
+
+        return all_available_columns
